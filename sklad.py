@@ -25,8 +25,25 @@ def log(*a):
     print(*a, flush=True)
 
 
+SKIP_DIRS = {"picture_db", "stock_upload"}      # fotky a složka pro nahrávání – nejsou to zásoby
+
+
+def is_dir(ftp, path):
+    here = ftp.pwd()
+    try:
+        ftp.cwd(path)
+        return True
+    except ftplib.all_errors:
+        return False
+    finally:
+        try:
+            ftp.cwd(here)
+        except ftplib.all_errors:
+            pass
+
+
 def listing(ftp, path=""):
-    """(cesta, velikost, čas) pro soubory v kořeni a o úroveň níž"""
+    """(cesta, velikost, čas) pro soubory v kořeni a o úroveň níž (server nemusí umět MLSD -> NLST + zkouška CWD)"""
     out = []
     def walk(p, depth):
         try:
@@ -34,19 +51,28 @@ def listing(ftp, path=""):
         except ftplib.all_errors:
             items = []
             try:
-                for n in ftp.nlst(p or "."):
-                    items.append((n.split("/")[-1], {"type": "file"}))
+                names = ftp.nlst(p or ".")
             except ftplib.all_errors:
                 return
+            for n in names:
+                name = n.split("/")[-1]
+                full = f"{p}/{name}" if p else name
+                items.append((name, {"type": "dir" if is_dir(ftp, full) else "file"}))
         for name, facts in items:
-            if name in (".", ".."):
+            if name in (".", "..") or name in SKIP_DIRS:
                 continue
             full = f"{p}/{name}" if p else name
             if facts.get("type") == "dir":
                 if depth < 1:
                     walk(full, depth + 1)
             elif facts.get("type") in ("file", None):
-                out.append((full, int(facts.get("size", 0) or 0), facts.get("modify", "")))
+                size, mod = int(facts.get("size", 0) or 0), facts.get("modify", "")
+                if not mod:
+                    try:
+                        mod = (ftp.sendcmd(f"MDTM {full}").split() + [""])[1]
+                    except ftplib.all_errors:
+                        mod = ""
+                out.append((full, size, mod))
     walk(path, 0)
     return out
 
