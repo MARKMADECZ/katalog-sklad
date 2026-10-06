@@ -8,6 +8,7 @@ Výstup cc.json obsahuje JEN kód SKU a počet kusů (žádné ceny) a jen kódy
 Do výpisu (veřejný log) jde jen název souboru, názvy sloupců a počty – žádné hodnoty ze souboru.
 """
 import csv, datetime, ftplib, io, json, os, re, sys, zipfile
+from zoneinfo import ZoneInfo
 
 HOST = (os.environ.get("CC_FTP_HOST") or "service.cottonclassics.com").replace("ftp://", "").strip("/ ")
 USER = os.environ.get("CC_FTP_USER", "")
@@ -187,10 +188,79 @@ def main():
     log(f"Řádků: {len(data)} | kódů z katalogu se zásobou: {len(stock)} | skladem > 0: {sum(1 for v in stock.values() if v > 0)}")
     if wanted and len(stock) < len(wanted) * 0.2:
         sys.exit("Našlo se méně než 20 % kódů z katalogu – zřejmě jiný soubor nebo sloupec. cc.json se nemění.")
-    now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=2)))
-    json.dump({"t": now.strftime("%d. %m. %Y %H:%M"), "src": os.path.basename(name), "n": len(stock), "v": stock},
+    out = {"v": stock, "n": len(stock)}
+    try:
+        priced = prices_from_ftp(files, wanted)
+    except Exception as e:                                   # ceny jsou navíc – při chybě zůstane jen sklad
+        log("Ceny se nepřepočítaly:", type(e).__name__)
+        priced = None
+    if priced:
+        tiers, rows, ref = priced
+        out = {"v": {k: [stock.get(k, -1), ref[k]] if k in ref else stock[k] for k in sorted(set(stock) | set(ref))},
+               "n": len(stock), "np": len(ref), "tiers": tiers, "p": rows}
+    now = datetime.datetime.now(ZoneInfo("Europe/Prague"))      # český čas včetně přechodu letní/zimní
+    json.dump({"t": now.strftime("%d. %m. %Y %H:%M"), "src": os.path.basename(name), **out},
               open(OUT, "w", encoding="utf-8"), ensure_ascii=False, separators=(",", ":"))
     log("Zapsáno cc.json")
+
+
+def prices_from_ftp(files, wanted):
+    """aktuální nákupní ceny z exportu na FTP (složka xlsx-data) -> PRODEJNÍ ceny podle skupin přirážek.
+    Veřejně jde jen prodejní cena; přirážky skupin jsou v tajném údaji CC_MULT, čísla skupin modelů v skupiny.json.
+    Vrací (pásma, cenové řady, {SKU: index řady}) nebo None. Do logu jen počty a názvy souborů."""
+    import decimal
+    mult = json.loads(os.environ.get("CC_MULT") or "{}")
+    gp = os.path.join(HERE, "skupiny.json")
+    if not mult or not os.path.exists(gp):
+        log("Ceny: chybí tajný údaj CC_MULT nebo skupiny.json – přepočítává se jen sklad.")
+        return None
+    G = json.load(open(gp, encoding="utf-8"))
+    xs = sorted((f for f in files if f[0].lower().startswith("xlsx-data/") and f[0].lower().endswith(".xlsx")), key=lambda f: (f[2], f[1]))
+    if not xs:
+        log("Ceny: ve složce xlsx-data není žádný .xlsx")
+        return None
+    name = os.environ.get("CC_PRICE_FILE") or xs[-1][0]
+    log("Ceny ze souboru:", name, f"(xlsx ve složce: {len(xs)})")
+    ftp = ftplib.FTP(HOST, timeout=180)
+    ftp.login(USER, PASS)
+    ftp.set_pasv(True)
+    buf = io.BytesIO()
+    ftp.retrbinary(f"RETR {name}", buf.write)
+    ftp.quit()
+    import openpyxl
+    wb = openpyxl.load_workbook(buf, read_only=True, data_only=True)
+    ws = wb["SKU-List"] if "SKU-List" in wb.sheetnames else wb.worksheets[0]
+    it = ws.iter_rows(values_only=True)
+    head = [str(h or "").strip() for h in next(it)]
+    if "SKU" not in head or not ({"Your Price", "VK100"} & set(head)):
+        log("Ceny: v listu chybí sloupce SKU / Your Price / VK100. Sloupce:", head)
+        return None
+    si, yi, vi = head.index("SKU"), head.index("Your Price") if "Your Price" in head else None, head.index("VK100") if "VK100" in head else None
+    rows, idx, ref = [], {}, {}
+    for r in it:
+        code = str(r[si] or "").strip()
+        if not code or (wanted and code not in wanted):
+            continue
+        g = G["g"].get(f"{code[:2]}.{code[2:6]}")
+        mu = mult.get(g) if g else None
+        cost = None
+        for ci in (yi, vi):
+            if ci is not None and r[ci] not in (None, ""):
+                try:
+                    cost = decimal.Decimal(str(r[ci]).replace(",", ".")); break
+                except decimal.InvalidOperation:
+                    pass
+        if not mu or not cost or cost <= 0:
+            continue
+        p = tuple(int((cost * decimal.Decimal(str(m))).to_integral_value(rounding=decimal.ROUND_CEILING)) for m in mu)
+        if p not in idx:
+            idx[p] = len(rows); rows.append(list(p))
+        ref[code] = idx[p]
+    log(f"Ceny: {len(ref)} kódů z katalogu, {len(rows)} cenových řad")
+    if wanted and len(ref) < len(wanted) * 0.5:
+        log("Ceny: méně než 50 % kódů z katalogu – ceny se nezveřejní (jen sklad).")
+        return None
+    return G["tiers"], rows, ref
 
 
 if __name__ == "__main__":

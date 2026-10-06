@@ -27,6 +27,7 @@ jobs:
           CC_FTP_HOST: ${{ secrets.CC_FTP_HOST }}
           CC_FTP_USER: ${{ secrets.CC_FTP_USER }}
           CC_FTP_PASS: ${{ secrets.CC_FTP_PASS }}
+          CC_MULT: ${{ secrets.CC_MULT }}       # přirážky skupin pro prodejní ceny (bez něj jen sklad)
           # když se sloupce nenajdou samy, doplňte přesné názvy:
           CC_SKU_COL: ""
           CC_QTY_COL: ""
