@@ -1,0 +1,43 @@
+name: Sklad Cotton Classics
+
+on:
+  schedule:
+    - cron: "10 4-18/2 * * *"      # každé 2 hodiny 6:10–20:10 českého letního času (4:10–18:10 UTC)
+  workflow_dispatch: {}            # ruční spuštění: Actions -> Sklad Cotton Classics -> Run workflow
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sklad
+  cancel-in-progress: false
+
+jobs:
+  sklad:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install --quiet openpyxl
+      - name: Stáhnout zásoby z FTP
+        env:
+          CC_FTP_HOST: ${{ secrets.CC_FTP_HOST }}
+          CC_FTP_USER: ${{ secrets.CC_FTP_USER }}
+          CC_FTP_PASS: ${{ secrets.CC_FTP_PASS }}
+          # když se sloupce nenajdou samy, doplňte přesné názvy:
+          CC_SKU_COL: ""
+          CC_QTY_COL: ""
+          CC_FTP_FILE: ""
+        run: python sklad.py
+      - name: Zveřejnit cc.json (jeden commit, historie neroste)
+        run: |
+          git config user.name "sklad-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet -- cc.json; then echo "Beze změny"; exit 0; fi
+          git checkout --quiet --orphan novy
+          git add -A
+          git commit --quiet -m "Sklad Cotton Classics $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push --quiet --force origin novy:main
